@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User Login | CivicPulse</title>
+    <link rel="stylesheet" href="/css/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        .auth-card p {
+            color: var(--text-muted);
+            line-height: 1.5;
+            margin: 0 0 1.5rem 0;
+        }
+
+        .google-login-btn {
+            align-items: center;
+            background: #ffffff;
+            border: 1px solid #dadce0;
+            border-radius: 6px;
+            box-sizing: border-box;
+            color: #1f1f1f;
+            display: flex;
+            font-size: 1rem;
+            font-weight: 600;
+            gap: 0.75rem;
+            justify-content: center;
+            padding: 0.8rem 1rem;
+            text-decoration: none;
+            transition: transform 0.2s, box-shadow 0.2s;
+            width: 100%;
+        }
+
+        .google-login-btn:hover {
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+            transform: translateY(-2px);
+        }
+
+        .demo-login-btn {
+            align-items: center;
+            background: linear-gradient(135deg, #6366f1, #a855f7);
+            border: none;
+            border-radius: 6px;
+            box-sizing: border-box;
+            color: #ffffff;
+            display: flex;
+            font-size: 1rem;
+            font-weight: 600;
+            gap: 0.75rem;
+            justify-content: center;
+            padding: 0.8rem 1rem;
+            text-decoration: none;
+            transition: transform 0.2s, box-shadow 0.2s;
+            width: 100%;
+            cursor: pointer;
+        }
+
+        .demo-login-btn:hover {
+            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
+            transform: translateY(-2px);
+        }
+
+        .google-mark {
+            display: grid;
+            font-weight: 700;
+            height: 22px;
+            place-items: center;
+            width: 22px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="auth-container">
+        <div class="auth-card">
+            <h1>User Login</h1>
+
+            <% if(error) { %>
+                <div class="error-message">
+                    <%= error %>
+                </div>
+            <% } %>
+
+            <p>Sign in securely with your Google account to report and track civic issues.</p>
+
+            <a href="/auth/google" class="google-login-btn">
+                <span class="google-mark">G</span>
+                <span>Continue with Google</span>
+            </a>
+
+            <form action="/auth/demo" method="POST" style="margin-top: 1rem;">
+                <button type="submit" class="demo-login-btn">
+                    <span>🔑 Continue with Demo Account</span>
+                </button>
+            </form>
+
+            <div class="links">
+                <p><a href="/">&larr; Back to Home</a></p>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>
