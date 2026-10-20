@@ -9,9 +9,15 @@ const app = express();
 
 const PORT = process.env.PORT || 3000;
 
+// =======================
+// View Engine
+// =======================
 app.set("view engine", "ejs");
 app.set("views", path.join(__dirname, "views"));
 
+// =======================
+// Middleware
+// =======================
 app.use(express.static(path.join(__dirname, "public")));
 app.use("/uploads", express.static(path.join(__dirname, "public/uploads")));
 
@@ -49,14 +55,18 @@ app.use((req, res) => {
 // =======================
 app.use((err, req, res, next) => {
     console.error(err.stack);
+    if (res.headersSent) return next(err);
+    if (err.code === 'LIMIT_FILE_SIZE') return res.status(400).send('Image must be 5 MB or smaller.');
+    if (err instanceof require('multer').MulterError || err.status === 400) return res.status(400).send(err.message);
     res.status(500).send("Internal Server Error");
 });
 
 // =======================
 // Start Server
 // =======================
-app.listen(PORT, () => {
+if (require.main === module) app.listen(PORT, () => {
     console.log("================================");
     console.log(`Server running at: http://localhost:${PORT}`);
     console.log("================================");
 });
+module.exports = app;

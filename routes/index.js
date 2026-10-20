@@ -1,5 +1,12 @@
 const express = require('express');
 const router = express.Router();
+// Express 4 does not forward rejected async handlers to error middleware.
+for (const method of ['get', 'post']) {
+    const register = router[method].bind(router);
+    router[method] = (route, ...handlers) => register(route, ...handlers.map(handler =>
+        (req, res, next) => Promise.resolve().then(() => handler(req, res, next)).catch(next)
+    ));
+}
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -7,14 +14,22 @@ const fs = require('fs');
 const { OpenAI } = require('openai');
 const supabase = require('../lib/supabase');
 const { createClient } = require('@supabase/supabase-js');
-const getAuthClient = () => createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
-    auth: { autoRefreshToken: false, persistSession: false }
+const getAuthClient = (req) => createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
+    auth: {
+        autoRefreshToken: false, persistSession: Boolean(req), detectSessionInUrl: false,
+        flowType: 'pkce',
+        ...(req ? { storage: {
+            getItem: key => req.session.oauthStorage?.[key] ?? null,
+            setItem: (key, value) => { (req.session.oauthStorage ||= {})[key] = value; },
+            removeItem: key => { if (req.session.oauthStorage) delete req.session.oauthStorage[key]; }
+        } } : {})
+    }
 });
 
-const openai = new OpenAI({
+const openai = process.env.OPENAI_API_KEY ? new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
-    baseURL: 'https://openrouter.ai/api/v1'
-});
+    baseURL: process.env.OPENAI_BASE_URL || 'https://openrouter.ai/api/v1'
+}) : null;
 
 // Multer setup for image uploads
 const uploadDir = path.join(__dirname, '../public/uploads/');
@@ -27,10 +42,19 @@ const storage = multer.diskStorage({
         cb(null, uploadDir);
     },
     filename: function (req, file, cb) {
-        cb(null, Date.now() + '-' + file.originalname);
+        cb(null, require('crypto').randomUUID() + path.extname(file.originalname).toLowerCase());
     }
 });
-const upload = multer({ storage: storage });
+const upload = multer({
+    storage, limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+    fileFilter: (req, file, cb) => {
+        const extensions = { 'image/jpeg': ['.jpg', '.jpeg'], 'image/png': ['.png'], 'image/webp': ['.webp'] };
+        if (extensions[file.mimetype]?.includes(path.extname(file.originalname).toLowerCase())) return cb(null, true);
+        const error = new Error('Upload a JPEG, PNG, or WebP image.');
+        error.status = 400;
+        cb(error);
+    }
+});
 
 // --- Telegram Helper ---
 async function sendTelegramMessage(chatId, message) {
@@ -176,7 +200,7 @@ router.get('/user-login', (req, res) => {
 });
 
 router.get('/auth/google', async (req, res) => {
-    const authClient = getAuthClient();
+    const authClient = getAuthClient(req);
     const { data, error } = await authClient.auth.signInWithOAuth({
         provider: 'google',
         options: {
@@ -189,7 +213,7 @@ router.get('/auth/google', async (req, res) => {
         return res.render('user-login', { error: 'Unable to start Google login. Check Supabase OAuth settings.' });
     }
 
-    res.redirect(data.url);
+    req.session.save(err => err ? res.status(500).send('Unable to save login session.') : res.redirect(data.url));
 });
 
 router.get('/auth/callback', async (req, res) => {
@@ -202,11 +226,12 @@ router.get('/auth/callback', async (req, res) => {
         }
         
         if (code) {
-            const authClient = getAuthClient();
+            const authClient = getAuthClient(req);
             const { data, error } = await authClient.auth.exchangeCodeForSession(code);
             if (error) throw error;
 
             const user = await findOrCreateSupabaseUser(data.user);
+            await new Promise((resolve, reject) => req.session.regenerate(err => err ? reject(err) : resolve()));
             req.session.userId = user.id;
             req.session.user = user;
             return req.session.save((saveErr) => {
@@ -305,6 +330,7 @@ router.post('/auth/callback', async (req, res) => {
         if (error) throw error;
 
         const user = await findOrCreateSupabaseUser(data.user);
+        await new Promise((resolve, reject) => req.session.regenerate(err => err ? reject(err) : resolve()));
         req.session.userId = user.id;
         req.session.user = user;
         req.session.save((saveErr) => {
@@ -359,6 +385,7 @@ router.post('/auth/demo', async (req, res) => {
         const user = await findOrCreateSupabaseUser(data.user);
 
         // 4. Set session
+        await new Promise((resolve, reject) => req.session.regenerate(err => err ? reject(err) : resolve()));
         req.session.userId = user.id;
         req.session.user = user;
         req.session.save((saveErr) => {
@@ -375,8 +402,7 @@ router.post('/auth/demo', async (req, res) => {
 });
 
 router.get('/user-logout', (req, res) => {
-    req.session.destroy();
-    res.redirect('/');
+    req.session.destroy(err => err ? res.status(500).send('Unable to log out.') : res.redirect('/'));
 });
 
 router.get('/user-dashboard', requireUserLogin, async (req, res) => {
@@ -406,6 +432,7 @@ router.get('/problem/:id', requireUserLogin, async (req, res) => {
             .eq('posted_by', req.session.userId)
             .single();
 
+        if (error?.code === 'PGRST116') return res.status(404).send('Problem not found');
         if (error) throw error;
         const problem = formatProblem(data);
         if (!problem) return res.status(404).send('Problem not found');
@@ -445,6 +472,7 @@ router.post('/post-problem', requireUserLogin, upload.single('image'), async (re
         if (error) throw error;
         res.redirect('/user-dashboard?success=1');
     } catch (err) {
+        if (req.file) await fs.promises.unlink(req.file.path).catch(() => {});
         console.error('Error creating problem:', err);
         res.status(500).send('Error creating problem: ' + err.message);
     }
@@ -456,6 +484,7 @@ router.post('/api/generate-description', requireUserLogin, upload.single('image'
             return res.status(400).json({ error: 'An image is required to generate a description.' });
         }
 
+        if (!openai) return res.status(503).json({ error: 'AI description generation is not configured. Enter the details manually.' });
         const localImagePath = req.file.path;
         const imageBase64 = fs.readFileSync(localImagePath).toString('base64');
 
@@ -465,7 +494,7 @@ router.post('/api/generate-description', requireUserLogin, upload.single('image'
 Format: Title | Description.`;
 
         const response = await openai.chat.completions.create({
-            model: 'gpt-4o-mini',
+            model: process.env.OPENAI_MODEL || 'openai/gpt-4o-mini',
             messages: [
                 {
                     role: 'user',
@@ -486,11 +515,12 @@ Format: Title | Description.`;
             description: parts[1] ? parts[1].replace(/\*/g, '').trim() : 'Description unavailable.'
         });
 
-        try { fs.unlinkSync(localImagePath); } catch (e) { }
+
     } catch (err) {
         console.error('OpenAI Generation Error Details:', err);
-        const errorMessage = err.response?.data?.error?.message || err.message || 'Unknown error';
-        res.status(500).json({ error: `OpenAI Error: ${errorMessage}. Please check your key and quota.` });
+        res.status(502).json({ error: 'AI generation failed. Please try again or enter details manually.' });
+    } finally {
+        if (req.file) await fs.promises.unlink(req.file.path).catch(() => {});
     }
 });
 
@@ -504,6 +534,7 @@ router.get('/admin-login', (req, res) => {
 
 router.post('/admin-login', async (req, res) => {
     const { username, password } = req.body;
+    if (typeof username !== 'string' || typeof password !== 'string' || !username.trim() || !password) return res.status(400).render('admin-login', { error: 'Username and password are required.' });
 
     const { data: admin, error } = await supabase
         .from('admins')
@@ -512,16 +543,16 @@ router.post('/admin-login', async (req, res) => {
         .maybeSingle();
 
     if (!error && admin && admin.password === password) {
+        await new Promise((resolve, reject) => req.session.regenerate(err => err ? reject(err) : resolve()));
         req.session.adminId = admin.id;
-        res.redirect('/admin-dashboard');
+        req.session.save(err => err ? res.status(500).send('Unable to save login session.') : res.redirect('/admin-dashboard'));
     } else {
         res.render('admin-login', { error: 'Invalid admin credentials' });
     }
 });
 
 router.get('/admin-logout', (req, res) => {
-    req.session.destroy();
-    res.redirect('/');
+    req.session.destroy(err => err ? res.status(500).send('Unable to log out.') : res.redirect('/'));
 });
 
 router.get('/admin-dashboard', requireAdminLogin, async (req, res) => {
@@ -538,6 +569,7 @@ router.get('/admin-dashboard', requireAdminLogin, async (req, res) => {
     }
 
     if (date) {
+        if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date))) return res.status(400).send('Invalid date filter.');
         const selectedDate = new Date(date);
         const startOfDay = new Date(selectedDate.setHours(0, 0, 0, 0));
         const endOfDay = new Date(selectedDate.setHours(23, 59, 59, 999));
@@ -572,6 +604,7 @@ router.get('/admin/problem/:id', requireAdminLogin, async (req, res) => {
             .eq('id', req.params.id)
             .single();
 
+        if (error?.code === 'PGRST116') return res.status(404).send('Problem not found');
         if (error) throw error;
         const problem = formatProblem(data);
         if (!problem) return res.status(404).send('Problem not found');
@@ -584,10 +617,13 @@ router.get('/admin/problem/:id', requireAdminLogin, async (req, res) => {
 
 router.post('/update-status/:id', requireAdminLogin, async (req, res) => {
     const { status } = req.body;
+    if (!['pending', 'processing', 'completed'].includes(status)) return res.status(400).send('Invalid problem status.');
     const updateData = { status };
+    if (status === 'pending') Object.assign(updateData, { processing_at: null, completed_at: null });
 
     if (status === 'processing') {
         updateData.processing_at = new Date().toISOString();
+        updateData.completed_at = null;
     } else if (status === 'completed') {
         updateData.completed_at = new Date().toISOString();
     }
